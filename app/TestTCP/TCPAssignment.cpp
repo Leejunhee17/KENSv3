@@ -237,6 +237,8 @@ int TCPAssignment::min(int x, int y){
 	}
 }
 
+	sockaddr *param2_ptr;
+
 int TCPAssignment::max(int x, int y){
 	if(x > y){
 		return x;
@@ -326,16 +328,10 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 		uint16_t cwnd = htons(51200);
 
 		Packet *finPacket = this->allocatePacket(54);
-		
-		// uint32_t my_seq_num;
-		// //my_seq_num = htonl(0x98);
-		// my_seq_num = htons(sock->last_ack_num);
-		// sock->fin_seq_num = my_seq_num;
-		// finPacket->writeData(34 + 4, &my_seq_num, 4);
 
 		uint32_t n_seq_num, n_ack_num;
 		n_seq_num = htonl(sock->ack_num);
-		n_ack_num = htonl(sock->seq_num);
+		n_ack_num = htonl(0);
 
 		sock->fin_seq_num = sock->ack_num;
 		sock->ack_num += 1;
@@ -890,6 +886,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				child->parent->backlog++;
 
 				child->state = ESTAB;
+
 				if(child->is_accept == 1){
 					this->returnSystemCall(child->uuid, child->fd);
 				}else{
@@ -897,9 +894,12 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				}
 			}else{
 				//normal sign
+				uint32_t write_buffer_filled = initial_write_buffer_size - child->write_buffer_remain;
+				if(child->ack_num - ntohl(ack_num) < write_buffer_filled){
+					//remove data in write buffer
+				}
 			}
 		} //if child_index = -1, there is no socket for packet
-
 
 	}else if(flags == 0x01){ // FIN
 		//printf("FIN\n");
@@ -917,10 +917,10 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 			myPacket->writeData(34 + 13, &my_flags, 1);
 
 			child->seq_num = ntohl(seq_num);
-			child->ack_num = ntohl(ack_num);
 
 			uint32_t n_seq_num, n_ack_num;
-			n_seq_num = ack_num; // htonl(child->ack_num);
+			//n_seq_num = ack_num; // htonl(child->ack_num);
+			n_seq_num = htonl(child->ack_num);
 			n_ack_num = htonl(ntohl(seq_num) + 1); //need to plus data_size
 
 			myPacket->writeData(34 + 4, &n_seq_num, 4);
