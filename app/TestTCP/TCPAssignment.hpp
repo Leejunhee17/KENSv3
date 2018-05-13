@@ -15,6 +15,7 @@
 #include <netinet/tcp.h>
 #include <netinet/ip.h>
 #include <netinet/in.h>
+#include <algorithm>
 
 
 #include <E/E_TimerModule.hpp>
@@ -35,10 +36,12 @@ private:
 	int comp_sockaddr_in(sockaddr_in *target1, sockaddr_in *target2);
 	sockaddr_in* make_sockaddr_in(uint32_t ip, uint16_t port);
 	int assign_random_port();
-	Packet* make_packet(Packet *packet_ptr, sockaddr_in *src, sockaddr_in *dest, uint8_t flags, uint8_t offset, uint16_t cwnd);
+	Packet* make_packet(Packet *packet_ptr, sockaddr_in *src, sockaddr_in *dest, uint8_t flags, uint8_t offset, uint16_t window_size);
 	void free_socket(tcp_socket *sock);
+	void erase_part_of_data(void *ptr, int original_size, int erase_size);
 
-
+	int min(int x, int y);
+	int max(int x, int y);
 
 
 public:
