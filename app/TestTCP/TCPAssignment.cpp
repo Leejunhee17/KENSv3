@@ -223,8 +223,8 @@ void TCPAssignment::free_socket(tcp_socket *sock){
 
 void TCPAssignment::erase_part_of_data(void *ptr, int original_size, int erase_size){
 	void *temp;
-	temp = calloc(original_size - erase_size, 1);
-	memcpy(temp, ptr, original_size - erase_size);
+	temp = calloc(original_size, 1);
+	memcpy(temp, ptr + erase_size, original_size - erase_size);
 	free(ptr);
 	ptr = temp;
 }
