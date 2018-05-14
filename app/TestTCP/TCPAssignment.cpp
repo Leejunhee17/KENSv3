@@ -62,12 +62,12 @@ struct tcp_socket{
 	uint32_t write_buffer_remain; /// Unit = Byte
 	uint32_t read_buffer_remain;
 
-
-
 	int peer_cwnd;
 
 	std::vector<struct blocked_read *> read_pending;
 	std::vector<struct blocked_write *> write_pending;
+
+	// shibal
 };
 
 struct blocked_read{
@@ -139,7 +139,7 @@ int TCPAssignment::comp_sockaddr_in(sockaddr_in *target1, sockaddr_in *target2){
 	if(target1->sin_family == target2->sin_family){
 		if(target1->sin_port == target2->sin_port){
 			if(target1->sin_addr.s_addr == target2->sin_addr.s_addr){
-				return 1;	
+				return 1;
 			}
 			if(target1->sin_addr.s_addr == inet_addr("0.0.0.0")){
 				return 1;
@@ -255,7 +255,7 @@ tcp_socket* make_socket(int pid, UUID uuid, int fd){
 	sock->pid = pid;
 	sock->uuid = uuid;
 	sock->fd = fd;
-	
+
 	sock->isBound = 0;
 	sock->state = CLOSED;
 	sock->is_accept = 0;
@@ -307,7 +307,7 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 		tcp_socket *sock;
 		sock = sock_vec[sock_index];
 
-		for (std::vector<struct blocked_read *>::size_type i = 0; i < sock->read_pending.size(); ++i){ 
+		for (std::vector<struct blocked_read *>::size_type i = 0; i < sock->read_pending.size(); ++i){
 			this->returnSystemCall(sock->read_pending[i]->uuid, -1); //return -1 for every pending read call
 		}
 
@@ -335,7 +335,7 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 
 		sock->fin_seq_num = sock->ack_num;
 		sock->ack_num += 1;
-		
+
 		finPacket->writeData(34 + 4, &n_seq_num, 4);
 		finPacket->writeData(34 + 8, &n_ack_num, 4);
 
@@ -389,7 +389,7 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 
 		if(data_amount == 0){ //The situation is not proper
 			printf("<READ> BUFFER IS EMPTY, READ BLOCKED\n");
-			
+
 			blocked_read *newblock;
 			newblock = (struct blocked_read *) calloc(sizeof(struct blocked_read), 1);
 
@@ -450,7 +450,7 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 
 			write_sock->write_buffer_remain -= param.param3_int;
 			erase_part_of_data(write_sock->write_buffer, data_amount, param.param3_int);
-		
+
 			this->returnSystemCall(syscallUUID, param.param3_int);
 		}else{
 			printf("<WRITE> BUFFER IS FILLED, write is blocked\n");
@@ -545,7 +545,7 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 		printf("<LISTEN> LISTEN FINISHED\n");
 		break;
 	case ACCEPT:
-	{		
+	{
 		//this->syscall_accept(syscallUUID, pid, param.param1_int,
 		//		static_cast<struct sockaddr*>(param.param2_ptr),
 		//		static_cast<socklen_t*>(param.param3_ptr));
@@ -567,7 +567,7 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 			break;
 		}
 
-		
+
 		if(server_sock->child_list.size() > 0){
 			// accept the packet already came
 			printf("<ACCEPT> There is packet, let's accept and\n");
@@ -595,7 +595,7 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 			sock_vec.push_back(child);
 			server_sock->wait_packet.push_back(child);
 		}
-		
+
 		printf("<ACCEPT> ACCEPT FINISHED\n");
 		break;
 	}
@@ -613,7 +613,7 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 
 		sock_index = find_socket_by_fd(param.param1_int, pid);
 		if(sock_index == -1){ // There is no socket
-			flag = 1; 
+			flag = 1;
 		}
 		if(sock_vec[sock_index]->isBound == 1){ // The socket is already bounded
 			flag = 1;
@@ -752,7 +752,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 					server_sock = sock_vec[i];
 					if(server_sock->backlog > 0){
-						
+
 						if(sock_index != -1){
 							printf("There is already a socket with same 4-tuple");
 						}else{
@@ -804,7 +804,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 					}
 					break;
 				}
-				
+
 			}
 		}
 	}
@@ -830,7 +830,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 		// printf("@@@@@@@@@@ Found dest_port: %x\n", sock_vec[sock_index]->dest_addr->sin_port);
 
 		// Response Packet
-		
+
 		sock->seq_num = ntohl(seq_num);
 		sock->ack_num = ntohl(ack_num);
 
@@ -866,7 +866,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 		//printf("child index is %d\n", child_index);
 		if(child_index != -1){
 			child = sock_vec[child_index];
-			
+
 			if(ntohl(ack_num) == child->fin_seq_num + 1){ //If ACK is about FIN
 				printf("ack of fin signal\n");
 				// if(child->state == FIN_WAIT_1){
@@ -875,7 +875,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				// 	child->state = CLOSED;
 				// 	this->removeFileDescriptor(child->pid, child->fd);
 				// 	this->returnSystemCall(child->uuid, 0);
-					
+
 				// 	free(sock_vec[child_index]);
 				// 	sock_vec.erase(sock_vec.begin() + child_index);
 				// }else{
@@ -908,7 +908,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 		tcp_socket *child;
 
 		child_index = sock_index;
-	
+
 		if(child_index != -1){
 			//printf("I found the socket\n");
 			child = sock_vec[child_index];
@@ -948,7 +948,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 		}
 
-		
+
 	}
 
 
@@ -972,7 +972,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 	// 		//send ack
 
 	// 		acket *ackPacket = this->allocatePacket(54);
-	
+
 	// 		uint8_t flags = 0x10;
 	// 		uint8_t offset = 0x50;
 	// 		uint16_t cwnd = htons(match_sock->read_buffer_remain);
@@ -993,7 +993,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 	// 	}
 
 	// }
-	
+
 
 }
 
