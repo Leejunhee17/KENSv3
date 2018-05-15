@@ -485,7 +485,7 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 		// param.param2_ptr = buffer pointer
 		// param.param3_int = given size for copying data
 
-		printf("<READ> READ CALLED\n");
+		//printf("<READ> READ CALLED\n");
 		sock_index = find_socket_by_fd(param.param1_int, pid);
 
 		if(sock_index == -1){
@@ -503,7 +503,7 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 
 		uint32_t read_buffer_filled = initial_buffer_size - read_sock->read_buffer_remain;
 		if(read_buffer_filled == 0){
-			printf("<READ> READ BLOCKED\n");
+			//printf("<READ> READ BLOCKED\n");
 			read_sock->blocked_read_uuid = syscallUUID;
 			read_sock->blocked_read_ptr = param.param2_ptr;
 			read_sock->blocked_read_size = param.param3_int;
@@ -511,13 +511,9 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 			uint16_t read_size = min(param.param3_int, read_buffer_filled);
 
 			memcpy(param.param2_ptr, read_sock->read_buffer, read_size);
-
 			erase_part_of_data(read_sock->read_buffer, read_buffer_filled, read_size);
 
 			read_sock->read_buffer_remain += read_size;
-			//read_sock->seq_num += read_size;
-
-			//read_data_and_ackpacket(read_sock, param.param2_ptr, read_buffer_filled, read_size);
 
 			this->returnSystemCall(syscallUUID, read_size);
 		}
@@ -1037,6 +1033,8 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				child->init_seq_num = 0;
 				child->parent->backlog++;
 
+				child->seq_num = ntohl(seq_num);
+
 				child->state = ESTAB;
 
 				if(child->is_accept == 1){
@@ -1074,102 +1072,79 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 					}				
 				}
 
-				//////////////////////////////////////////////////////////////////////////////////////////////
-
 				if(data_size > 0){
-					uint16_t acceptable_data_size;
-					acceptable_data_size = min(data_size, child->read_buffer_remain);
-					if(acceptable_data_size > 0){
-						data_size = acceptable_data_size;
-						//printf("Oh there is acceptable data!\n");
-						void *read_ptr;
-						read_ptr = calloc(data_size, 1);
-						myPacket->readData(54, read_ptr, data_size);
-						hexdump(read_ptr, data_size);
+					void *read_ptr;
+					uint32_t read_buffer_filled;
 
-						uint32_t read_buffer_filled = initial_buffer_size - child->read_buffer_remain;
+					read_ptr = calloc(data_size, 1);
+					myPacket->readData(54, read_ptr, data_size);
+					//hexdump(read_ptr, data_size);
+					if(seq_num == child->seq_num){
+						// proper data
+						read_buffer_filled = initial_buffer_size - child->read_buffer_remain;
 						memcpy((uint8_t *) child->read_buffer + read_buffer_filled, read_ptr, data_size);
-						free(read_ptr);
-						
+						//hexdump(child->read_buffer, read_buffer_filled);
+
 						child->read_buffer_remain -= data_size;
 						child->seq_num += data_size;
 						read_buffer_filled += data_size;
 
-						if(child->blocked_read_size > 0){
-							//printf("there was pending read\n");
-							uint16_t read_size = min(child->blocked_read_size, read_buffer_filled);
-							read_data_and_ackpacket(child, child->blocked_read_ptr, read_buffer_filled, read_size);
+						unordered_seq *target;
+						while(child->cumulated_seq.size() > 0){
+							target = child->cumulated_seq[0];
+							if(target->seq_num == child->seq_num){
+								memcpy((uint8_t *) child->read_buffer + read_buffer_filled, target->ptr, target->data_size);
 
-							this->returnSystemCall(child->blocked_read_uuid, read_size);
-							child->blocked_read_size = 0;
+								child->read_buffer_remain -= target->data_size;
+								child->seq_num += target->data_size;
+								read_buffer_filled += target->data_size;
+
+								child->cumulated_seq.erase(child->cumulated_seq.begin());
+							}else{
+								break;
+							}
 						}
 
-						uint8_t flags = 0x10;
-						uint8_t offset = 0x50;
-						Packet *ackPacket = this->allocatePacket(54);
-						uint16_t cwnd = htons(child->read_buffer_remain);
+					}else if(seq_num > child->seq_num){ // seq_num > child->seq_num
+						// unordered seq
+						unordered_seq *new_seq;
+						new_seq = (unordered_seq *) calloc(sizeof(struct unordered_seq), 1);
+						
+						new_seq->seq_num = seq_num;
+						new_seq->data_size = data_size;
+						new_seq->ptr = read_ptr;
 
-						make_packet_ack_seq(ackPacket, child->src_addr, child->dest_addr, flags, offset, cwnd, child->ack_num, child->seq_num);
+						for(std::vector<struct unordered_seq *>::size_type i = 0; i < child->cumulated_seq.size(); ++i){
+							if(child->cumulated_seq[i]->seq_num > new_seq->seq_num){
+								child->cumulated_seq.insert(child->cumulated_seq.begin() + i, new_seq);
+								break;
+							}
+						}
+					} //else seq_num < child->seq_num : already known packet
 
-						this->sendPacket("IPv4", ackPacket);
+					uint8_t flags = 0x10;
+					uint8_t offset = 0x50;
+					Packet *ackPacket = this->allocatePacket(54);
+					uint16_t cwnd = htons(child->read_buffer_remain);
+
+					make_packet_ack_seq(ackPacket, child->src_addr, child->dest_addr, flags, offset, cwnd, child->ack_num, child->seq_num);
+					this->sendPacket("IPv4", ackPacket);
+
+					if(child->blocked_read_size > 0){
+						//printf("there was pending read\n");
+						read_buffer_filled = initial_buffer_size - child->read_buffer_remain;
+
+						uint16_t read_size = min(child->blocked_read_size, read_buffer_filled);
+
+						memcpy(child->blocked_read_ptr, child->read_buffer, read_size);
+						erase_part_of_data(child->read_buffer, read_buffer_filled, read_size);
+
+						child->read_buffer_remain += read_size;
+
+						this->returnSystemCall(child->blocked_read_uuid, read_size);
+						child->blocked_read_size = 0;
 					}
 				}
-
-				// child->read_buffer_remain -= data_size;
-
-				// if(child->read_count != 0) {
-				// 	printf("<PACKET> READ UNBLOCK\n");
-				// 	child->read_count = 0;
-				// 	child->read_buffer_remain += data_size;
-				// 	if(data_size >= child->read_count) {
-				// 		packet->readData(54, child->read_buffer, child->read_count);
-				// 	} else {
-				// 		packet->readData(54, child->read_buffer, data_size);
-				// 	}
-
-				// 	// send ACK packet
-				// 	Packet *ackPacket;
-				// 	ackPacket = allocatePacket(54);
-
-				// 	uint32_t new_seq_num;
-				// 	uint32_t new_ack_num;
-				// 	uint16_t new_cwnd;
-				// 	uint8_t offset = 0x50;
-				// 	printf("<PACKET> ACK CHILD SEQ: %x\n", child->seq_num);
-				// 	printf("<PACKET> ACK CHILD ACK: %x\n", child->ack_num);
-				// 	new_seq_num = htonl(child->ack_num);
-				// 	new_ack_num = htonl(child->seq_num + data_size);
-				// 	new_cwnd = htons(51200 - data_size);
-
-				// 	ackPacket->writeData(14 + 12, &dest_ip, 4);
-				// 	ackPacket->writeData(14 + 16, &src_ip, 4);
-				// 	ackPacket->writeData(34, &dest_port, 2);
-				// 	ackPacket->writeData(34 + 2, &src_port, 2);
-
-				// 	ackPacket->writeData(34 + 4, &new_seq_num, 4);
-				// 	ackPacket->writeData(34 + 8, &new_ack_num, 4);
-				// 	ackPacket->writeData(34 + 12, &offset, 1);
-				// 	ackPacket->writeData(34 + 13, &flags, 1);
-				// 	ackPacket->writeData(34 + 14, &new_cwnd, 2);
-				
-				// 	ackPacket->readData(34, tcp_header, 20);
-				// 	my_checksum = ~htons(NetworkUtil::tcp_sum(dest_ip, src_ip, tcp_header, 20));
-				// 	ackPacket->writeData(34 + 16, &my_checksum, 2);
-
-				// 	this->sendPacket("IPv4", ackPacket);
-				// 	this->returnSystemCall(child->uuid, data_size);
-				// 	printf("<PACKET> ACK PACKET SEND\n");
-				// 	return;
-				// }
-
-				// blocked_read *Rcvd;
-				// Rcvd = (blocked_read *) malloc(sizeof(struct blocked_read *));
-				// Rcvd->uuid = child->uuid;
-				// packet->readData(54, Rcvd->buf, data_size);
-				// Rcvd->len = data_size;
-				// child->read_pending.push_back(Rcvd);
-				///////////////////////////////////////////////////////////////////////////////////////////////
-				//printf("<PacketArrived>haha it's normal ACK\n");
 			}
 		} //if child_index = -1, there is no socket for packet
 		//printf("ack processing end\n");
@@ -1224,51 +1199,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 		
 	}
-
-
-	// if((sock_index != - 1) && (data_size > 0)){
-	// 	tcp_socket *match_sock;
-	// 	match_sock = sock_vec[sock_index];
-
-	// 	printf("Oh there's %d byte of data\n", data_size);
-	// 	void *data_ptr;
-
-	// 	data_ptr = calloc(data_size , 1);
-	// 	myPacket->readData(54, &data_ptr, data_size);
-	// 	seq_num = ntohl(seq_num);
-
-	// 	if(seq_num == ntohl(match_sock->read_buffer_last_byte)){
-
-	// 		memcpy(match_sock->read_buffer + (initial_read_buffer_size - match_sock->read_buffer_remain), data_ptr, data_size);
-	// 		match_sock->read_buffer_last_byte += data_size;
-	// 		match_sock->read_buffer_remain -= data_size;
-
-	// 		//send ack
-
-	// 		acket *ackPacket = this->allocatePacket(54);
-	
-	// 		uint8_t flags = 0x10;
-	// 		uint8_t offset = 0x50;
-	// 		uint16_t cwnd = htons(match_sock->read_buffer_remain);
-
-	// 		ackPacket->writeData(34 + 4, &my_seq_num, 4);
-
-	// 		ackPacket = make_packet(ackPacket, match_sock->src_addr, match_sock->dest_addr, flags, offset, cwnd);
-
-	// 	}else{
-	// 		unordered_seq *new_seq;
-
-
-	// 		new_seq = (unordered_seq *) calloc(sizeof(struct unordered_seq), 1);
-
-	// 		new_seq->seq_num = seq_num; // seq_num of packet
-	// 		new_seq->data_size = data_size;
-	// 		new_seq->ptr = data_ptr;
-	// 	}
-
-	// }
-	
-
 }
 
 void TCPAssignment::timerCallback(void* payload)
