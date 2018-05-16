@@ -47,6 +47,7 @@ private:
 	void fill_checksum(Packet *packet_ptr, uint16_t data_size);
 	void make_packet_ack_seq(Packet *packet_ptr, sockaddr_in *src, sockaddr_in *dest, uint8_t flags, uint8_t offset, uint16_t window_size, uint32_t seq_num, uint32_t ack_num);
 	void send_packet_with_data(tcp_socket *w_sock, uint32_t original_data, uint32_t write_size);
+	void m_send_packet_with_data(tcp_socket *w_sock, uint32_t startpoint, uint32_t send_size);
 
 	void hexdump(void *ptr, int buflen);
 
