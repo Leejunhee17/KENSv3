@@ -20,6 +20,9 @@
 
 #define MSS 512
 
+#define alpha 0.125
+#define beta 0.25
+
 
 namespace E
 {
@@ -43,6 +46,9 @@ struct tcp_socket{
 	int backlog;
 	int is_accept;
 
+	sockaddr *param2_ptr;
+	tcp_socket *parent;
+
 	uint32_t init_seq_num;
 	uint32_t fin_seq_num;
 
@@ -50,9 +56,6 @@ struct tcp_socket{
 	uint32_t ack_num; // about write
 
 	std::vector<struct unordered_seq *> cumulated_seq;
-
-	sockaddr *param2_ptr;
-	tcp_socket *parent;
 
 	std::vector<struct tcp_socket *> wait_packet;
 	std::vector<struct tcp_socket *> child_list;
@@ -62,8 +65,6 @@ struct tcp_socket{
 
 	char *read_buffer;
 	uint16_t read_buffer_remain;
-
-	std::vector<struct Packet *> unacked_packets;
 
 	uint16_t peer_cwnd;
 
@@ -75,13 +76,38 @@ struct tcp_socket{
 	void *blocked_read_ptr;
 	uint16_t blocked_read_size;
 
-	int read_count;
+	uint16_t cwnd;
+	std::vector<struct unacked_packet *> unacked_packet_list;
+	int unacked_data;
+
+	// Time RTT;		// unit : ms
+	// Time RTTVAR;
+	// Time RTO;
+
+	// void *payload;
+	// UUID timer_uuid;
+
+	int dup_ack_count;
 };
 
 struct unordered_seq{
 	uint32_t seq_num;
 	uint32_t data_size;
 	void *ptr;
+};
+
+struct fd_pid{
+	int fd;
+	int pid;
+};
+
+struct unacked_packet{
+	Packet *packet_ptr;
+	// uint32_t seq_num;
+	// uint32_t data_size;
+	uint32_t expect_ack_num;
+
+	Time sendtime;	
 };
 
 TCPAssignment::TCPAssignment(Host* host) : HostModule("TCP", host),
@@ -275,6 +301,20 @@ tcp_socket* TCPAssignment::make_socket(int pid, UUID uuid, int fd){
 
 	sock->blocked_write_size = 0;
 	sock->blocked_read_size = 0;
+
+	sock->cwnd = MSS;
+	sock->RTT = 100000;
+
+	sock->dup_ack_count = 0;
+
+	fd_pid *temp;
+	temp = (struct fd_pid *) calloc(sizeof(struct fd_pid), 1);
+	temp->fd = fd;
+	temp->pid = pid;
+	sock->payload = (void *)temp;
+
+	sock->unacked_data = 0;
+
 	return sock;
 }
 
@@ -336,7 +376,6 @@ void TCPAssignment::send_packet_with_data(tcp_socket *w_sock, uint32_t original_
 	copy_ptr = (uint8_t *)w_sock->write_buffer + original_data;
 	copied_data_ptr = calloc(MSS, 1);
 
-	
 	while(write_size > 0){
 		if(write_size >= MSS){
 			copy_size = MSS;
@@ -361,8 +400,61 @@ void TCPAssignment::send_packet_with_data(tcp_socket *w_sock, uint32_t original_
 
 		write_size -= copy_size;
 		copy_ptr = (uint8_t *)copy_ptr + copy_size;
-		w_sock->ack_num += copy_size;
+		//w_sock->ack_num += copy_size;
 	}
+	free(copied_data_ptr);
+}
+
+void TCPAssignment::m_send_packet_with_data(tcp_socket *w_sock, uint32_t startpoint, uint32_t send_size){
+	uint8_t flags = 0x10;
+	uint8_t offset = 0x50;
+
+	void *copy_ptr, *copied_data_ptr;
+	uint16_t copy_size = 0;
+	uint32_t calculated_ack_num = (w_sock->ack_num - w_sock->unacked_data) + startpoint; //also become seq_num of packet
+
+	copy_ptr = (uint8_t *) w_sock->write_buffer + startpoint;
+	copied_data_ptr = calloc(MSS, 1);
+
+	while(send_size > 0){
+		if(send_size >= MSS){
+			copy_size = MSS;
+		}else{
+			copy_size = send_size;
+		}
+
+		Packet *myPacket = this->allocatePacket(54 + copy_size);
+		uint16_t cwnd = htons(w_sock->read_buffer_remain);
+
+		make_packet_ack_seq(myPacket, w_sock->src_addr, w_sock->dest_addr, flags, offset, cwnd, calculated_ack_num, w_sock->seq_num);
+		calculated_ack_num += copy_size;
+
+		memcpy(copied_data_ptr, copy_ptr, copy_size);
+		myPacket->writeData(54, copied_data_ptr, copy_size);
+
+		unacked_packet *new_unack_packet;
+		new_unack_packet = (unacked_packet *)calloc(sizeof(unacked_packet), 1);
+		new_unack_packet->packet_ptr = myPacket;
+		new_unack_packet->expect_ack_num = calculated_ack_num;
+		
+		printf("<WRITE> Given data is \n");
+		hexdump(copied_data_ptr, copy_size);
+
+		fill_checksum(myPacket, copy_size);
+		this->sendPacket("IPv4", myPacket);
+
+		// new_unack_packet->sendtime = this->getHost()->getSystem()->getCurrentTime();
+		// w_sock->unacked_packet_list.push_back(new_unack_packet);
+
+		w_sock->unacked_data += copy_size;
+		//printf("A data packet with %d byte, seq_num %d sent\n", copy_size, calculated_ack_num - copy_size);
+
+		send_size -= copy_size;
+		copy_ptr = (uint8_t *)copy_ptr + copy_size;
+		//w_sock->ack_num += copy_size;
+	}
+
+	w_sock->ack_num = calculated_ack_num;
 	free(copied_data_ptr);
 }
 
@@ -449,14 +541,14 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 		n_ack_num = htonl(0);
 
 		sock->fin_seq_num = sock->ack_num;
-		sock->ack_num += 1;
 		
 		finPacket->writeData(34 + 4, &n_seq_num, 4);
 		finPacket->writeData(34 + 8, &n_ack_num, 4);
+		sock->ack_num += 1;
 
 		finPacket = make_packet(finPacket, sock->src_addr, sock->dest_addr, flags, offset, cwnd);
 
-		printf("<CLOSED> Send packet on closed called\n");
+		//printf("<CLOSED> Send packet on closed called\n");
 		this->sendPacket("IPv4", finPacket);
 
 		if(sock->state == FINRCVD){
@@ -469,7 +561,7 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 		}else{
 			sock->state = FINSENT;
 		}
-		printf("<CLOSED> CLOSED FINISHED\n");
+		//printf("<CLOSED> CLOSED FINISHED\n");
 
 		// free(sock_vec[sock_index]);
 		// sock_vec.erase(sock_vec.begin() + sock_index);
@@ -517,42 +609,16 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 
 			this->returnSystemCall(syscallUUID, read_size);
 		}
-
-		// // printf("<READ> read_buffer_reamin %hu \n", my_sock->read_buffer_remain);
-		// if(my_sock->read_buffer_remain == 51200) {
-		// 	printf("<READ> READ BLOCKED\n");
-		// 	my_sock->uuid = syscallUUID;
-		// 	my_sock->read_buffer = (char *) param.param2_ptr;
-		// 	my_sock->read_count = param.param3_int;
-		// }
-		// else {
-		// 	printf("<READ> READ BUF\n");
-		// 	uint16_t ByteCnt = 0;
-		// 	blocked_read *Rcvd;
-
-		// 	while(my_sock->read_pending.size() != 0) {
-		// 		Rcvd = my_sock->read_pending[0];
-		// 		if(param.param3_int < ByteCnt + Rcvd->len) {
-		// 			break;
-		// 		}
-		// 		memcpy(my_sock->read_buffer + ByteCnt, Rcvd->buf, Rcvd->len);
-		// 		ByteCnt +=  Rcvd->len;
-		// 		my_sock->read_pending.erase(my_sock->read_pending.begin());
-		// 	}
-		// 	my_sock->read_buffer_remain -= ByteCnt;
-		// 	printf("<READ> READ FINISHED\n");
-		// 	this->returnSystemCall(syscallUUID, ByteCnt);
-		// }
 		break;
 	}
 	case WRITE:
-	{	//this->syscall_write(syscallUUID, pid, param.param1_int, param.param2_ptr, param.param3_int);
+	{	
+		//this->syscall_write(syscallUUID, pid, param.param1_int, param.param2_ptr, param.param3_int);
 		// param.param1_int = fd
 		// param.param2_ptr = given data
 		// param.param3_int = give datat size
 		//printf("<WRITE> WRITE CALLED by size of %d byte\n", param.param3_int);
 		sock_index = find_socket_by_fd(param.param1_int, pid);
-
 		if(sock_index == -1){
 			this->returnSystemCall(syscallUUID, -1);
 			break;
@@ -560,46 +626,53 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 
 		tcp_socket *write_sock;
 		write_sock = sock_vec[sock_index];
-
 		if(write_sock->state != ESTAB){
 			this->returnSystemCall(syscallUUID, -1);
 			break;
 		}
 		
 		uint32_t empty_field = write_sock->peer_cwnd - write_sock->write_buffer_filled;
-		//printf("<WRITE> unacked data is %d byte, and peer_cwnd is %d byte, so the empty field is %d byte\n", write_sock->write_buffer_filled, write_sock->peer_cwnd, empty_field);
-		// printf("<WRITE> Given data is \n");
-		// hexdump(param.param2_ptr, 1024);
-		// printf("\n");
 		if(empty_field == 0){ //block write
 			//printf("<WRITE> No empty space in buffer, write blocked\n");
-
 			write_sock->blocked_write_uuid = syscallUUID;
 			write_sock->blocked_write_ptr = param.param2_ptr;
 			write_sock->blocked_write_size = param.param3_int;
-
 		}else{
+			////////////// Write data in data buffer /////////////////
 			uint16_t write_size = min(param.param3_int, empty_field);
-			memcpy((uint8_t *)write_sock->write_buffer + write_sock->write_buffer_filled, param.param2_ptr, param.param3_int);
-
-			send_packet_with_data(write_sock, write_sock->write_buffer_filled, write_size);
-
+			memcpy((uint8_t *)write_sock->write_buffer + write_sock->write_buffer_filled, param.param2_ptr, write_size);
 			write_sock->write_buffer_filled += write_size;
-
 			this->returnSystemCall(syscallUUID, write_size);
+			//printf("%d byte data successfully written!\n", write_size);
+
+			////////////// Send data if cwnd allow ///////////////////
+
+			uint16_t send_size = min(write_size, write_sock->cwnd - write_sock->unacked_data);
+			if(send_size > 0){
+				//printf("cwnd is %d byte, sendsize is %d byte\n",write_sock->cwnd, send_size);
+				m_send_packet_with_data(write_sock, write_sock->write_buffer_filled - write_size, send_size);
+				//write_sock->ack_num += send_size;
+
+				// // The first packet activate the timer
+				// if(write_sock->write_buffer_filled == 0){
+				// 	fd_pid *target;
+				// 	target = (fd_pid *) write_sock->payload;
+				// 	//write_sock->timer_uuid = this->addTimer(target, write_sock->RTT);
+					
+				// 	// printf("the time is %d, and timer set with %d\n", this->getHost()->getSystem()->getCurrentTime(), write_sock->RTT);
+				// 	// printf("pay load hs %d for fd and %d for pid\n and real fd is %d and readl pid is %d\n", target->fd, target->pid, write_sock->fd, write_sock->pid);
+				// }
+			}
+
+			
 		}
-
-		
-		//printf("<WRITE> WRITE FINISHED\n");
-
-		//exit(0);
 		break;
 	}
 	case CONNECT:
 	{
 		//this->syscall_connect(syscallUUID, pid, param.param1_int,
 		//static_cast<struct sockaddr*>(param.param2_ptr), (socklen_t)param.param3_int);
-		printf("<CONNECT> CONNECT CALLED\n");
+		//printf("<CONNECT> CONNECT CALLED\n");
 		struct sockaddr_in *server_addr;
 		server_addr = static_cast<struct sockaddr_in *>(param.param2_ptr);
 
@@ -652,14 +725,13 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 		// printf("@@@@@@@@@@ Connect dest_ip: %x\n", client->dest_addr->sin_addr.s_addr);
 		// printf("@@@@@@@@@@ Connect dest_port: %x\n", client->dest_addr->sin_port);
 
-		printf("<CONNECT> Packet send on connect\n");
 		this->sendPacket("IPv4", synPacket);
-		printf("<CONNECT> CONNECT FINISHED\n");
+		//printf("<CONNECT> CONNECT FINISHED\n");
 		break;
 	}
 	case LISTEN:
 		//this->syscall_listen(syscallUUID, pid, param.param1_int, param.param2_int);
-		printf("<LISTEN> LISTEN CALLED\n");
+		//printf("<LISTEN> LISTEN CALLED\n");
 		int sock_index;
 		sock_index = find_socket_by_fd(param.param1_int, pid);
 		if(sock_index == -1){
@@ -670,16 +742,16 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 			sock_vec[sock_index]->uuid = syscallUUID;
 
 			this->returnSystemCall(syscallUUID, 0);
-			printf("<LISTEN> LISTEN complete with backlog %d\n", sock_vec[sock_index]->backlog);
+			//printf("<LISTEN> LISTEN complete with backlog %d\n", sock_vec[sock_index]->backlog);
 		}
-		printf("<LISTEN> LISTEN FINISHED\n");
+		//printf("<LISTEN> LISTEN FINISHED\n");
 		break;
 	case ACCEPT:
 	{		
 		//this->syscall_accept(syscallUUID, pid, param.param1_int,
 		//		static_cast<struct sockaddr*>(param.param2_ptr),
 		//		static_cast<socklen_t*>(param.param3_ptr));
-		printf("<ACCEPT> ACCEPT CALLED\n");
+		//printf("<ACCEPT> ACCEPT CALLED\n");
 		sock_index = find_socket_by_fd(param.param1_int, pid);
 
 		if(sock_index == -1){
@@ -700,7 +772,7 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 		
 		if(server_sock->child_list.size() > 0){
 			// accept the packet already came
-			printf("<ACCEPT> There is packet, let's accept and\n");
+			//printf("<ACCEPT> There is packet, let's accept and\n");
 
 			child = server_sock->child_list[0];
 			server_sock->child_list.erase(server_sock->child_list.begin());
@@ -712,7 +784,7 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 			this->returnSystemCall(syscallUUID, child->fd);
 		}else{
 			// wait for the packet
-			printf("<ACCEPT> Wait for packet\n");
+			//printf("<ACCEPT> Wait for packet\n");
 
 			child = make_socket(pid, syscallUUID, this->createFileDescriptor(pid));
 			child->is_accept = 1;
@@ -726,14 +798,14 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 			server_sock->wait_packet.push_back(child);
 		}
 		
-		printf("<ACCEPT> ACCEPT FINISHED\n");
+		//printf("<ACCEPT> ACCEPT FINISHED\n");
 		break;
 	}
 	case BIND:
 		//this->syscall_bind(syscallUUID, pid, param.param1_int,
 		//		static_cast<struct sockaddr *>(param.param2_ptr),
 		//		(socklen_t) param.param3_int);
-		printf("<BIND> BIND CALLED\n");
+		//printf("<BIND> BIND CALLED\n");
 		int flag; 			// flag for double bind
 		sockaddr_in *addr;
 
@@ -775,7 +847,7 @@ void TCPAssignment::systemCallback(UUID syscallUUID, int pid, const SystemCallPa
 			//state is still closed
 			this->returnSystemCall(syscallUUID, 0);
 		}
-		printf("<BIND> BIND FINISHEDED\n");
+		// printf("<BIND> BIND FINISHEDED\n");
 		break;
 	case GETSOCKNAME:
 		//this->syscall_getsockname(syscallUUID, pid, param.param1_int,
@@ -836,12 +908,6 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 	// Check Recieved Packet Checksum
 	packet->readData(34 + 16, &checksum, 2);
-
-	// if(E::NetworkUtil::tcp_sum(src_ip, dest_ip, tcp_header, 20) != 0){
-	// 	this->freePacket(packet);
-	// 	printf("Wrong checksum packet!\n");
-	// 	return;
-	// }
 
 	data_size = packet->getSize() - 54;
 	//printf("<PACKET> data_size: %hu\n", data_size);
@@ -930,7 +996,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 							my_checksum = ~htons(NetworkUtil::tcp_sum(dest_ip, src_ip, tcp_header, 20));
 							myPacket->writeData(34 + 16, &my_checksum, 2);
 
-							printf("Message send at packetarrived->syn=1\n");
+							//printf("Message send at packetarrived->syn=1\n");
 							this->sendPacket("IPv4", myPacket);
 						}
 					}
@@ -1028,8 +1094,7 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 			}
 			else if(ntohl(ack_num) == child->init_seq_num + 1){
 				//The last packet for handshaking
-				printf("<PacketArrived>ACK for handshake\n");
-				
+				//printf("<PacketArrived>ACK for handshake\n");
 				child->init_seq_num = 0;
 				child->parent->backlog++;
 
@@ -1052,25 +1117,68 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 				ack_num = ntohl(ack_num);
 
 				uint32_t unacked_data_response = child->ack_num - ack_num;
-				uint32_t acked_size = write_sock->write_buffer_filled - unacked_data_response;
+				uint32_t acked_size = child->unacked_data - unacked_data_response;
 
 				if(acked_size > 0){
 					//printf("New packet for new ack arrived\n");
+
+					write_sock->dup_ack_count = 0;
+
+					///////////////// Calculate RTT part /////////////////////////
+					// while(write_sock->unacked_packet_list.size() > 0){
+					// 	if(write_sock->unacked_packet_list[0]->expect_ack_num < ack_num){
+					// 		write_sock->unacked_packet_list.erase(write_sock->unacked_packet_list.begin()); // erase the packet
+					// 	}else if(write_sock->unacked_packet_list[0]->expect_ack_num == ack_num){
+					// 		write_sock->RTT = this->getHost()->getSystem()->getCurrentTime() - write_sock->unacked_packet_list[0]->sendtime; //calculated RTT
+					// 	}else{
+					// 		break;
+					// 	}
+					// }
+
+					//////////// Erase buffer and take pending write ////////////////
+
+					//printf("%u size of data acked\n", acked_size);
 					erase_part_of_data(write_sock->write_buffer, write_sock->write_buffer_filled, acked_size);
 					write_sock->write_buffer_filled -= acked_size;
-
+				
 					uint32_t empty_field = write_sock->peer_cwnd - write_sock->write_buffer_filled;
 					if(write_sock->blocked_write_size > 0){ // If there is a pending wrtie
-						uint16_t write_size = min(write_sock->blocked_write_size, empty_field);
+						uint32_t write_size = min(write_sock->blocked_write_size, empty_field);
 						memcpy((uint8_t *)write_sock->write_buffer + write_sock->write_buffer_filled, write_sock->blocked_write_ptr, write_size);
 
-						send_packet_with_data(write_sock, write_sock->write_buffer_filled, write_size);
 						write_sock->write_buffer_filled += write_size;
 
 						this->returnSystemCall(write_sock->blocked_write_uuid, write_size);
 						write_sock->blocked_write_size = 0;
-					}				
+					}
+
+					//////////////// Send data ///////////////////
+					write_sock->unacked_data = unacked_data_response;
+
+					//printf("@@@@@@@@@@@@@@@ ack confirmed, upgrade cwnd from %u to %u\n", write_sock->cwnd, min(write_sock->cwnd + MSS, write_sock->peer_cwnd));
+					write_sock->cwnd = min(write_sock->cwnd + MSS, write_sock->peer_cwnd);
+
+					uint32_t send_size = min(write_sock->write_buffer_filled, write_sock->cwnd) - write_sock->unacked_data;
+					m_send_packet_with_data(write_sock, write_sock->unacked_data, send_size);
+					//write_sock->ack_num -= write_sock->cwnd;
+
+					//this->cancelTimer(write_sock->timer_uuid);
+					//write_sock->timer_uuid = this->addTimer(write_sock->payload, write_sock->RTT);
+					// if(unacked_data_response == 0){
+					// 	printf("@@@@@@@@@@@@@@@@@@@@@@@ack confirmed, upgrade cwnd from %u to %u\n", write_sock->cwnd, min(write_sock->cwnd + MSS, write_sock->peer_cwnd));
+					// 	write_sock->cwnd = min(write_sock->cwnd + MSS, write_sock->peer_cwnd);
+
+					// 	uint32_t startpoint = 0;
+					// 	uint32_t send_size = min(write_sock->cwnd, write_sock->write_buffer_filled);
+					// 	m_send_packet_with_data(write_sock, startpoint, send_size);
+					// 	//write_sock->ack_num -= write_sock->cwnd;
+
+					// 	//this->cancelTimer(write_sock->timer_uuid);
+					// 	//write_sock->timer_uuid = this->addTimer(write_sock->payload, write_sock->RTT);
+					// }
 				}
+
+				///////////////////////////////////////////////////////////////////////////////////////////////
 
 				if(data_size > 0){
 					void *read_ptr;
@@ -1180,12 +1288,12 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 			myPacket->readData(34, tcp_header, 20);
 			checksum = ~htons(E::NetworkUtil::tcp_sum(dest_ip, src_ip, tcp_header, 20));
 			myPacket->writeData(34 + 16, &checksum, 2);
-			printf("<PacketArrived>Send ACK of FIN\n");
+			//printf("<PacketArrived>Send ACK of FIN\n");
 			this->sendPacket("IPv4", myPacket);
 
 			if(child->state == FINSENT){
 				child->state = CLOSED;
-				printf("<CLOSED> CLOSED RETURN\n");
+				//printf("<CLOSED> CLOSED RETURN\n");
 				this->removeFileDescriptor(child->pid, child->fd);
 				this->returnSystemCall(child->uuid, 0);
 
@@ -1203,7 +1311,27 @@ void TCPAssignment::packetArrived(std::string fromModule, Packet* packet)
 
 void TCPAssignment::timerCallback(void* payload)
 {
+	int sock_index;
+	fd_pid *target;
+	target = (fd_pid *) payload;
+	// printf("Timer callback with paylaod of fd % d pid %d", target->fd, target->pid);
+	// printf("the time is %d\n", this->getHost()->getSystem()->getCurrentTime());
 
+	sock_index = find_socket_by_fd(target->fd, target->pid);
+
+	if(sock_index != -1){
+		tcp_socket *call_sock;
+		call_sock = sock_vec[sock_index];
+
+		call_sock->cwnd = MSS;
+
+		uint32_t startpoint = 0;
+		send_packet_with_data(call_sock, startpoint, call_sock->cwnd);
+		//call_sock->ack_num -= call_sock->cwnd;
+
+		this->cancelTimer(call_sock->timer_uuid);
+		call_sock->timer_uuid = this->addTimer(target, call_sock->RTT);
+	}
 }
 
 }
