@@ -370,44 +370,6 @@ void TCPAssignment::fill_checksum(Packet *packet_ptr, uint16_t data_size){
 	packet_ptr->writeData(34 + 16, &checksum, 2);
 }
 
-void TCPAssignment::send_packet_with_data(tcp_socket *w_sock, uint32_t original_data, uint32_t write_size){
-	uint8_t flags = 0x10;
-	uint8_t offset = 0x50;
-
-	void *copy_ptr, *copied_data_ptr;
-	uint16_t copy_size = 0;
-	copy_ptr = (uint8_t *)w_sock->write_buffer + original_data;
-	copied_data_ptr = calloc(MSS, 1);
-
-	while(write_size > 0){
-		if(write_size >= MSS){
-			copy_size = MSS;
-		}else{
-			copy_size = write_size;
-		}
-
-		Packet *myPacket = this->allocatePacket(54 + copy_size);
-		uint16_t cwnd = htons(w_sock->read_buffer_remain);
-
-		make_packet_ack_seq(myPacket, w_sock->src_addr, w_sock->dest_addr, flags, offset, cwnd, w_sock->ack_num, w_sock->seq_num);
-
-		memcpy(copied_data_ptr, copy_ptr, copy_size);
-		myPacket->writeData(54, copied_data_ptr, copy_size);
-		
-		// printf("<WRITE> Given data is \n");
-		// hexdump(copied_data_ptr, copy_size);
-
-		fill_checksum(myPacket, copy_size);
-		this->sendPacket("IPv4", myPacket);
-		//printf("<WRITE>Packet with data sent\n\n");
-
-		write_size -= copy_size;
-		copy_ptr = (uint8_t *)copy_ptr + copy_size;
-		//w_sock->ack_num += copy_size;
-	}
-	free(copied_data_ptr);
-}
-
 void TCPAssignment::m_send_packet_with_data(tcp_socket *w_sock, uint32_t startpoint, uint32_t send_size, int is_retransmit){
 	/////////////////////////// Update acknum and unacked_data //////////////////
 	uint8_t flags = 0x10;
